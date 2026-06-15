@@ -1,0 +1,206 @@
+<h1>plipbox: Python Emulator</h1>
+
+<h2>1. Introduction</h2>
+
+<p>Recently, I had some time to spend and wanted to work on the <a href="http://lallafa.de/blog/amiga-projects/plipbox">plipbox</a>
+project's Amiga driver. Unfortunately, I only had my MacBook Pro with me and no
+Amiga or plipbox hardware.</p>
+
+<p>What does a SW developer do if the real hardware is not at hand?</p>
+
+<p>Yes, you write an emulator that represents the missing HW in SW on a machine
+you have access to...</p>
+
+<h3>Adding a Virtual Parallel Port Protocol in FS-UAE</h3>
+
+<p>That said, I installed all required Amiga SW in a virtual environment in
+<a href="http://fs-uae.net">FS-UAE</a> on my Mac and soon I had my <strong>plipbox.device</strong> SANA II driver
+talking with the virtual parallel port in FS-UAE. What was missing now is a
+protocol that communicates the complete I/O state from FS-UAE to another
+process. Then I could write a standalone application that does emulate the
+plipbox firmware and plipbox.device in FS-UAE would be operational.</p>
+
+<p>I defined a simple two-byte bi-directional protocol called <a href="https://github.com/cnvogelg/fs-uae-gles/blob/chris-devel/vpar.md"><strong>vpar</strong></a> that
+communicates any change in the emulation of FS-UAE's Amiga parallel port to an
+external process and also receives external changes for input lines from the
+process and realizes them in FS-UAE's emulated parallel port.</p>
+
+<p>Having a POSIX compatible system with pseudo-terminals (ptys) I devised the
+link between both processes as a simple file-open interface in FS-UAE and a pty
+in the plipbox emulator (Note: any other interprocess mechanism works here also
+but this one was very easy to add in FS-UAE).</p>
+
+<p>The setup looks like this:</p>
+
+<pre><code>    +----------+                                  +---------+
+    | plipbox  |                                  | patched |
+    | emulator |--(opens)--&gt; [PTY] &lt;--(file I/O)--| FS-UAE  |
+    +----------+                                  +---------+
+                &lt;--------- vpar protocol --------&gt;
+</code></pre>
+
+<p>All required changes to FS-UAE are available in my clone of the FS-UAE
+repository on <a href="https://github.com/cnvogelg/fs-uae-gles/tree/chris-devel">GitHub</a> in the <code>chris-devel</code> branch.</p>
+
+<p>For the plipbox emulator application I chose my favorite script language
+Python. With it setting up the pty for inter-process communication and
+implementing the vpar protocol peer was done in a few hours.</p>
+
+<h3>Setting up the Network</h3>
+
+<p>Ok, the plipbox emulator in Python can now talk PLIP via vpar's virtual
+parallel port. The next step is to add access to an Ethernet device on the
+lowest frame level for our plipbox emulator.</p>
+
+<p>I had a look at the <a href="http://www.tcpdump.org">pcap</a> library that allows injecting packets into
+an existing adapter, but the Python bindings often lacked the inject feature
+of the library and so I dropped this idea.</p>
+
+<p>Then I found a setup using a <a href="http://en.wikipedia.org/wiki/TUN/TAP">TAP</a> device to easily create and receive
+ethernet packets from a user space application. Combine this with a real
+ethernet adapter via an interface bridge and you have access to real ethernet
+with a simple TAP file I/O interface (opening <code>/dev/tap0</code>) from your
+application.</p>
+
+<p>The setup looks like this:</p>
+
+<pre><code>    +----------+              +---------+                +----------+
+    | Real Eth |              | TAP     |                | plipbox  |
+    | Adapter  |&lt;-- Bridge --&gt;| Adapter |&lt;-- File I/O --&gt;| emulator |
+    +----------+              +---------+                +----------+
+        en1         bridge0       tap0
+        +----- OS net interfaces ----+
+</code></pre>
+
+<p>For the real ethernet adapter I use a second USB ethernet adapter on my Mac
+that is not configured (IP: 0.0.0.0) but active (up) in Mac OS X. This way OS X
+does not use it and my emulator can use it exclusively.</p>
+
+<p>Creating the TAP device and building the bridge with the real adapter is done
+with some sudo'ed system command right in the startup of the emulator.</p>
+
+<p>Note: the TAP driver is not shipped with Mac OS X itself, but you can add it by
+installing the ones from the <a href="http://tuntaposx.sourceforge.net">TUN TAP OSX</a> project.</p>
+
+<h3>Putting it all together</h3>
+
+<p>On top of the vpar Python module I implemented the magPLIP protocol layer in
+an own Python class. Now all pieces to create the plipbox were available.</p>
+
+<p>The plipbox main script sets up the vpar, magplip, and ethernet with TAP and
+interface bridge. In the main loop it does I/O multi-plexing with select() on
+the file descriptor for the vpar PTY and for the TAP file. </p>
+
+<p>A packet arriving from TAP is filtered (i.e. multicast and unknown broadcasts
+are removed) similar to the real plipbox firmware and then delivered to the
+emulated Amiga via the vpar connection.</p>
+
+<p>A packet incoming via PLIP is directly delivered to the local network and thus
+written to the TAP file.</p>
+
+<p>That's it! A working plipbox running as a Python script on my Mac... 
+Similar to the firmware I added some optional debugging output to see the
+packet contents and to measure the timing and latency.</p>
+
+<h2>2. Setup</h2>
+
+<p>If you want to setup your own plipbox emulation you'll need the following
+prerequisites. Please note that the current approach relies on PTYs, TAP and
+bridge network devices and thus requires an OS supporting these cool things.
+I currently tested only Mac OS X and Linux. </p>
+
+<h3>Common Setup</h3>
+
+<ul>
+<li>On all platforms you'll need a Python 2.7 without any special packages
+installed</li>
+</ul>
+
+<h3>Mac OS X Installation</h3>
+
+<ul>
+<li><p>First install the <a href="http://en.wikipedia.org/wiki/TUN/TAP">TUN TAP OS X driver</a> </p></li>
+<li><p>The new TAP device files need special access rights to use them. I added my
+user to group <code>wheel</code> to gain access to these files:</p>
+
+<pre><code># dscl . -append /groups/wheel GroupMembership $LOGNAME
+</code></pre></li>
+<li><p>plipbox sets up the interface bridge with some ifconfig commands that require
+root privileges. The script calls <strong>sudo</strong> to perform these actions. You can
+adjust your <code>/etc/sudoers</code> file with <code>visudo</code> to gain access without entering
+a password each time:</p>
+
+<pre><code>%admin  ALL=(ALL) NOPASSWD: ALL
+</code></pre></li>
+<li><p>Make sure that the ethernet interface you want to bridge is not configured
+for IP (IPv4 address is 0.0.0.0) but enbaled (i.e. up)</p></li>
+</ul>
+
+<h3>Linux Installation</h3>
+
+<ul>
+<li><p>similar to OSX setup <strong>sudo</strong> to call commands without password</p></li>
+<li><p>the Linux kernel needs TUN/TAP support with the <code>tun</code> kernel module. Modern
+Linux systems ship this module already. If this module is not installed you
+can install it with <code>insmod tun</code>. Just make sure to find the device node
+<code>/dev/net/tun</code> in your file system.</p></li>
+<li><p>you need the <code>tunctl</code> tool. On Debian/Ubuntu systems it is available in the
+<code>uml-utilities</code> package.</p></li>
+<li><p>you need the <code>brctl</code> ethernet bridge tool. On Debian/Ubuntu systems it is
+available in the <code>bridge-utils</code> package.</p></li>
+</ul>
+
+<h2>3. Usage</h2>
+
+<h3>Running plipbox</h3>
+
+<p>You typically run the plipbox emulator with:</p>
+
+<pre><code>  &gt; cd python
+  &gt; ./plipbox -e &lt;ethernet_if&gt;
+</code></pre>
+
+<p>The <code>-e</code> option is required to set the ethernet address you want to use for
+bridging. On Mac OS X this interface is typically named <code>en*</code>, on Linux it is
+<code>eth*</code>.</p>
+
+<p>You can quit plipbox by pressing <code>CTRL+C</code>. This will shut down all resources
+including TAP and bridge interface and removes the vpar PTY.</p>
+
+<h3>Running FS-UAE with vpar support</h3>
+
+<p>When the plipbox emulator is started it will wait for the connect from FS-UAE.
+So start this tool next. Make sure to use my patched 
+<a href="https://github.com/cnvogelg/fs-uae-gles/tree/chris-devel">FS-UAE with vpar support</a>. In your FS-UAE configuration add the following 
+line to enable vpar support:</p>
+
+<pre><code>  parallel_port = raw:/tmp/vpar
+</code></pre>
+
+<p>The path <code>/tmp/vpar</code> is the default link path that will be created by plipbox
+and points to the PTY that was opened by plipbox for vpar communication. You
+can change this path with the <code>-l</code> option.</p>
+
+<p>You can set the environment variable <code>VPAR_DEBUG=1</code> before running FS-UAE to
+see low-level vpar debug information similar to the <code>-d</code> debug switch in the
+plipbox emulator.</p>
+
+<p>If you quit FS-UAE then plipbox will be notified and shut down, too.</p>
+
+<h3>Plipbox options</h3>
+
+<p>The following <strong>plipbox options</strong> are available:</p>
+
+<ul>
+<li><strong>-v</strong>: enable verbose output. Shows incoming and outgoing packets.</li>
+<li><strong>-d</strong>: enable debug output. Show the vpar and magplip diagnose messages.
+This allows you to diagnose the low level parallel protocol.</li>
+<li><strong>-e <ifname></strong>: Name of ethernet device to be used for bridging.</li>
+<li><strong>-t <ifname></strong>: Name of TAP device that will be created for packet generation
+from virtual PLIP. </li>
+<li><strong>-l <path></strong>: The link that will point to the PTY that FS-UAE with vpar
+support can connect to. </li>
+<li><strong>-E</strong>: disable filtering of packets arriving from Ethernet</li>
+</ul>
+
+<p>EOF</p>

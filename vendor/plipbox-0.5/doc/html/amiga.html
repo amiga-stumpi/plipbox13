@@ -1,0 +1,202 @@
+<h1>plipbox: Amiga Setup</h1>
+
+<h2>0. Changes</h2>
+
+<ul>
+<li>2011-08-05  <em>38.1a</em>  plip2slip support</li>
+<li>2012-06-03  <em>38.1b</em>  plipbox support</li>
+<li>2013-04-06  <em>0.3</em>    introduced own plipbox.device ethernet device</li>
+<li>2013-05-19  <em>0.3</em>    converted to markdown. added more stacks</li>
+</ul>
+
+<h2>1. Supported Network Stacks</h2>
+
+<p>The following network stacks have been successfully tested with plipbox:</p>
+
+<ul>
+<li>AmiTCP 3.0b2</li>
+<li>Genesis (OS3.9)</li>
+<li>MiamiDX (from <a href="http://classicwb.abime.net">Classic Workbench</a>)</li>
+<li><a href="http://roadshow.apc-tcp.de/index-de.php">Roadshow 1.11</a> </li>
+</ul>
+
+<h2>2. Setup Hints</h2>
+
+<h3>2.1 Common Setup</h3>
+
+<ul>
+<li><p>All network stacks expect the plipbox device driver in <code>devs:networks</code> on
+your system volume. So copy this file first before proceeding.</p></li>
+<li><p>Copy <code>plipbox.device</code> from this release in the <code>amiga/bin</code> directory to your
+Amiga installation. Select the suitable m680x0 version for your hardware
+platform and copy the plipbox.device file without the <code>.000</code> or <code>.020</code>
+extension:</p>
+
+<pre><code>copy plipbox.device.000 devs:networks/plipbox.device
+</code></pre></li>
+</ul>
+
+<h3>2.2 AmiTCP</h3>
+
+<ul>
+<li>For a very simple setup you can use the <a href="http://roadshow.apc-tcp.de/index-de.php">Network Boot Disk for Amiga</a>
+and start with this one. You have to modify the vanilla disk as it does
+not contain the plipdox drivers, yet. </li>
+<li>Insert this disk into your favorite Amiga emulator and perform the following
+steps to prepare the disk.</li>
+<li>Copy <code>plipbox.device</code> on the disk (see section 2.1)</li>
+<li><p>Edit the file <code>AmiTCP/db/interfaces</code> and add:</p>
+
+<pre><code>plipbox dev=devs:networks/plipbox.device
+</code></pre></li>
+<li>Adjust your <code>AmiTCP:bin/startnet</code> and rename the interface to <code>plipbox0</code>.
+On the network boot disk: Edit <code>df0:s/Prefs/Env-Archive/nbddriver</code> (EnvARC:)
+and set <code>plipbox0</code></li>
+<li>In <code>EnvARC:sana2</code> (Network Boot Disk: <code>df0:s/Prefs/Env-Archive</code>) you can
+place an optional configuration file called <code>plipbox.config</code>.
+For options see the plipbox documentation.
+A sample file is available in directory <code>amiga/src</code> of this release.</li>
+<li>Correctly set your Amiga's IP to match your network environment.
+In the network boot disk use <code>EnvARC:nbdip</code> to set the Amiga's IP and
+use <code>EnvARC:nbdgw</code> to set the gateway of your network.</li>
+<li>Do not forget to configure the correct DNS server otherwise you won't be
+able to resolve non-numeric IP addresses. Have a look at the file
+<code>AmiTCP:db/netdb-myhost</code> and adapt the <code>NAMESERVER</code> entry accordingly.
+Use the DNS server of your local network here. (in my setup 192.168.2.1).
+The network boot disk uses the IP address stored in the <code>EnvARC:nbdns</code> file.</li>
+</ul>
+
+<h3>2.3 Genesis</h3>
+
+<ul>
+<li>Genesis is very similar to the AmiTCP setup (its more or less a UI for
+AmiTCP and uses its core for the network stuff) </li>
+<li>Copy the plibpox.device to your system (see section 2.1)</li>
+<li>Open the <code>GenesisPrefs</code></li>
+<li>In <code>Interfaces</code> select <code>New</code>
+<ul>
+<li>In <code>Interface</code> Tab enter:
+<ul>
+<li>Enter the interface <code>Name: plipbox0</code></li>
+<li>Enter <code>IP Address, Gateway, Netmask</code> to match your local network</li>
+</ul></li>
+<li>In <code>SANA II</code> Tab enter:
+<ul>
+<li><code>Specify SANA II device: devs:networks/plipbox.device</code>  </li>
+</ul></li>
+<li>Confirm interface creation with <code>Okay</code></li>
+<li>In <code>Resolve</code> Tab do not forget to name your DNS servers and set your
+domain name(s) </li>
+</ul></li>
+<li>Note: <code>dynamic</code> setup does not work with plipbox. You must either use static 
+or an external <a href="http://aminet.net/package/comm/tcp/dhcp_amitcp">DHCP client</a> suitable for AmiTCP/Genesis.</li>
+<li>Now you can start <code>Genesis</code> and enable your new <code>plipbox0</code> interface</li>
+</ul>
+
+<h3>2.4 MiamiDX</h3>
+
+<ul>
+<li>Launch <code>MiamiDX</code></li>
+<li>Select <code>Hardware</code> Tab and click <code>New</code>:
+<ul>
+<li>In <code>Select Hardware Type</code> pick <code>Ethernet</code></li>
+<li>Enter a name for the hardware, e.g. <code>Name: plipbox</code></li>
+<li>Keep <code>Type: SANA II</code></li>
+<li>Pick plipbox.device: <code>Driver: devs:networks/plipbox.device</code></li>
+<li>Confirm with <code>Ok</code></li>
+</ul></li>
+<li>Select <code>Interfaces</code> Tab and click <code>New</code>:
+<ul>
+<li>Pick <code>Interface Type: Ethernet</code></li>
+<li>Pick <code>Interface connection: LAN</code></li>
+<li>Select your hardware: <code>plipbox</code></li>
+<li>You can either configure your Amiga statically or with DHCP: Select
+<code>static</code> or <code>dynamic</code> in <code>IP Type, Netmask Type, Gateway Type</code>. Enter
+your network parameters in static mode.</li>
+<li>Note: multicast is not supported in plipbox. Therefore, keep 
+<code>Multicast: disabled</code>.</li>
+<li>Note: Configure DHCP in <code>TCP/IP Settings...</code> to fetch DNS servers, too.</li>
+</ul></li>
+<li>In <code>Databases</code> Tab select Table <code>DNS servers</code> and add your static DNS
+server IPs (if you don't use dynamic DNS via DHCP)</li>
+<li>Do not forget to save your settings with Amiga+S or <code>Menu: Settings -&gt; Save</code></li>
+<li>Now you can go online with your new interface <code>plipbox</code></li>
+<li>If you use multiple plipbox devices in a single network then you have to
+set a unique MAC address for each one. Select <code>Hardware Tab</code> and double
+click your <code>plipbox</code> entry. Now select <code>SANA-II Parameters</code> and enter a
+new MAC address in the <code>Hardware address</code> field.</li>
+</ul>
+
+<h3>2.5 Roadshow</h3>
+
+<ul>
+<li>Begin with copying the plipbox device driver (see section 2.1)</li>
+<li><p>Then you need an interface configuration file for the plipbox device.
+Simply copy a template from <code>Storage/NetInterface</code> and modify this one:</p>
+
+<pre><code>copy sys:Storage/NetInterfaces/cnet devs:NetInterfaces/plipbox
+</code></pre></li>
+<li><p>Now adjust the following values in the file (use either static or DHCP section!):</p>
+
+<pre><code>device=plipbox.device
+# -- DHCP --
+configure=dhcp
+# -- static --
+address=&lt;your ip&gt;
+netmask=&lt;your mask&gt;
+</code></pre></li>
+<li><p>Have a look in <code>devs:internet/name_resolution</code> to set your DNS servers and
+your domain name.</p></li>
+<li>After a reboot the interface will be brought up automatically in the
+<code>User-Startup</code> section of Roadshow</li>
+<li><p>For testing you can activate/de-activate the interface with:</p>
+
+<pre><code>&gt; addnetinterface devs:netinterfaces/plipbox
+&gt; ... use network ...
+&gt; netshutdown
+</code></pre></li>
+<li><p>To make sure that the plipbox device goes offline if you shut down the net
+you have to add the following options to your interface configuration file:</p>
+
+<pre><code>downgoesoffline=yes
+</code></pre></li>
+<li><p>If you use multiple plipbox devices in a single network then you have to 
+assign them unique MAC addresses. You can set the MAC address of your plipbox
+with the following option in your configuration file:</p>
+
+<pre><code>hardwareaddress=1a:11:a1:a0:00:01
+</code></pre></li>
+</ul>
+
+<h2>3. Build plipbox.device from Source</h2>
+
+<ul>
+<li>Only for advanced users! All others can use the supplied binaries!
+You really need to recompile the binaries only if you want to modify
+or enhance them.</li>
+<li>I cross-compile the binaries here with vamos running the SAS C V6.58 compiler</li>
+<li>Install <a href="http://lallafa.de/blog/amiga-projects/amitools/vamos/">vamos</a> on your Mac or PC</li>
+<li><p>Copy the following Amiga Directories either from a real machine or an emulator
+to a directory on your Mac. The directory is named <code>$HOME/amiga/shared</code>
+here but you can use another directory as well but need to adjust <code>AMIGA_DIR</code>
+in <code>amiga/src/makefile</code>!</p>
+
+<pre><code>~/amiga/shared:
+  wb310             system root of a Workbench 3.1 HD Installation
+  sc                complete installation directory of SAS C 6.58
+  AmiTCP-SDK-4.3    AmiTCP SDK
+</code></pre>
+
+<p>The <a href="http://aminet.net/package/comm/tcp/AmiTCP-SDK-4.3">AmiTCP-SDK-4.3</a> is available on Aminet</p></li>
+<li>Enter directory <code>amiga/src</code> of this release</li>
+<li><p>Build on your Mac or PC shell with:</p>
+
+<pre><code>&gt; make dist       build release files
+&gt; make all        build without optimization
+&gt; make all_opt    build with optimization
+&gt; make clean      remove all built files
+</code></pre></li>
+<li><p>The resulting files can then be found in <code>amiga/bin</code></p></li>
+</ul>
+
+<p>EOF</p>
