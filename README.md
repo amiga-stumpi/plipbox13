@@ -25,7 +25,18 @@ build/plipbox.device
 
 ## Current status
 
-The device currently uses a minimal OS1.3 SANA-II skeleton plus plipbox-05 hardware protocol code. The default build uses a bounded C SEND path (`PLIPBOX13_C_SEND=1`) to avoid hangs in the original timer/assembly send path during bring-up.
+The device currently uses a minimal OS1.3 SANA-II skeleton plus plipbox-05 hardware protocol code. The default build uses bounded C SEND/RX servicing (`PLIPBOX13_C_SEND=1`) to avoid hangs in the original timer/assembly send path during bring-up.
+
+Confirmed on real hardware with TheWire13 v1.5:
+
+- SANA-II OpenDevice succeeds
+- S2_DEVICEQUERY succeeds
+- S2_GETSTATIONADDRESS returns `1a:11:a1:a0:47:11`
+- S2_CONFIGINTERFACE succeeds
+- DHCP DISCOVER/OFFER/REQUEST/ACK completes
+- Lease observed: `192.168.7.11`, gateway/DNS `192.168.7.2`
+
+Next validation targets are ARP, DNS, UDP, TCP, and sustained transfers.
 
 ## Important rule
 
