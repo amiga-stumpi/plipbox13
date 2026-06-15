@@ -5,8 +5,12 @@
 #include <exec/errors.h>
 #include <exec/ports.h>
 #include <exec/memory.h>
+#include <exec/interrupts.h>
+#include <devices/timer.h>
 #include <utility/tagitem.h>
 #include <devices/sana2.h>
+
+#include "hw.h"
 
 #include <proto/exec.h>
 #include <clib/alib_protos.h>
@@ -20,6 +24,9 @@
 #endif
 #ifndef PLIPBOX13_HANDSHAKE_DIAG
 #define PLIPBOX13_HANDSHAKE_DIAG 0
+#endif
+#ifndef PLIPBOX13_RX_AFTER_TX_POLLS
+#define PLIPBOX13_RX_AFTER_TX_POLLS 64
 #endif
 
 #ifndef S2ERR_NO_ERROR
@@ -37,11 +44,20 @@
 #ifndef S2WERR_UNIT_OFFLINE
 #define S2WERR_UNIT_OFFLINE 2
 #endif
+#ifndef S2ERR_SOFTWARE
+#define S2ERR_SOFTWARE 9
+#endif
+#ifndef S2WERR_BUFF_ERROR
+#define S2WERR_BUFF_ERROR 4
+#endif
 #ifndef SANA2IOF_QUICK
 #define SANA2IOF_QUICK IOF_QUICK
 #endif
 #ifndef SANA2IOF_RAW
 #define SANA2IOF_RAW 0
+#endif
+#ifndef SANA2IOF_BCAST
+#define SANA2IOF_BCAST 0x20
 #endif
 #ifndef S2_BROADCAST
 #define S2_BROADCAST (S2_START + 5)
@@ -58,6 +74,8 @@ extern int plipbox13_hw_online(const UBYTE *mac, const char *name);
 extern void plipbox13_hw_offline(void);
 extern int plipbox13_hw_send(const UBYTE *dst, const UBYTE *src, UWORD type, const UBYTE *payload, ULONG len);
 extern int plipbox13_hw_handshake_test(void);
+extern int plipbox13_hw_try_recv(void);
+extern const struct HWFrame *plipbox13_hw_frame(void);
 extern BOOL plipbox_call_bm(BMFunc func, void *dst, void *src, LONG size);
 
 const char plipbox13_device_name[] = DEVICE_NAME;
@@ -156,6 +174,98 @@ static void abort_all_reads(void)
         n = next;
     }
     Permit();
+}
+
+
+static int is_broadcast_addr(const UBYTE *addr)
+{
+    int i;
+    for (i = 0; i < 6; ++i) {
+        if (addr[i] != 0xff)
+            return 0;
+    }
+    return 1;
+}
+
+static int deliver_frame_to_read(struct IOSana2Req *req, const struct HWFrame *frame)
+{
+    const UBYTE *src;
+    ULONG len;
+
+    if (!req || !frame)
+        return 0;
+
+    if (req->ios2_Req.io_Flags & SANA2IOF_RAW) {
+        src = frame->hwf_DstAddr;
+        len = frame->hwf_Size;
+        req->ios2_Req.io_Flags = SANA2IOF_RAW;
+    } else {
+        if (frame->hwf_Size < HW_ETH_HDR_SIZE)
+            return 0;
+        src = (const UBYTE *)(frame + 1);
+        len = (ULONG)frame->hwf_Size - HW_ETH_HDR_SIZE;
+        req->ios2_Req.io_Flags = 0;
+    }
+
+    if (!plipbox_call_bm(g_bm.bm_CopyToBuffer, req->ios2_Data, (void *)src, (LONG)len)) {
+        req->ios2_Req.io_Error = S2ERR_SOFTWARE;
+        req->ios2_WireError = S2WERR_BUFF_ERROR;
+        return 0;
+    }
+
+    req->ios2_DataLength = len;
+    mem_copy(req->ios2_SrcAddr, frame->hwf_SrcAddr, 6);
+    mem_copy(req->ios2_DstAddr, frame->hwf_DstAddr, 6);
+    if (is_broadcast_addr(frame->hwf_DstAddr))
+        req->ios2_Req.io_Flags |= SANA2IOF_BCAST;
+    req->ios2_Req.io_Error = S2ERR_NO_ERROR;
+    req->ios2_WireError = S2WERR_GENERIC_ERROR;
+    return 1;
+}
+
+static int service_one_rx(void)
+{
+    const struct HWFrame *frame;
+    struct Node *n;
+    struct IOSana2Req *req = 0;
+    ULONG type;
+
+    if (!g_online || !g_have_bm)
+        return 0;
+    if (!plipbox13_hw_try_recv())
+        return 0;
+
+    frame = plipbox13_hw_frame();
+    if (!frame || frame->hwf_Size < HW_ETH_HDR_SIZE)
+        return 0;
+    type = (ULONG)frame->hwf_Type;
+
+    Forbid();
+    for (n = g_read_list.lh_Head; n && n->ln_Succ; n = n->ln_Succ) {
+        req = (struct IOSana2Req *)n;
+        if (req->ios2_PacketType == type) {
+            Remove(n);
+            break;
+        }
+        req = 0;
+    }
+    Permit();
+
+    if (!req)
+        return 0;
+
+    (void)deliver_frame_to_read(req, frame);
+    ReplyMsg(&req->ios2_Req.io_Message);
+    return 1;
+}
+
+static void service_rx_polls(UWORD polls)
+{
+    UWORD i;
+    for (i = 0; i < polls; ++i) {
+        if (service_one_rx())
+            break;
+    }
 }
 
 static void device_query(struct IOSana2Req *req)
@@ -270,13 +380,19 @@ static void begin_io(
 
     switch (req->ios2_Req.io_Command) {
     case CMD_READ:
-        /* Stage-0 SANA skeleton: do not take ownership of caller requests yet.
-         * Returning offline here lets TheWire13 exercise RX init without any
-         * device-side list manipulation.
-         */
-        req->ios2_Req.io_Error = S2ERR_OUTOFSERVICE;
-        req->ios2_WireError = S2WERR_UNIT_OFFLINE;
-        break;
+        if (!g_online || !g_have_bm) {
+            req->ios2_Req.io_Error = S2ERR_OUTOFSERVICE;
+            req->ios2_WireError = S2WERR_UNIT_OFFLINE;
+            break;
+        }
+        req->ios2_Req.io_Message.mn_Node.ln_Type = NT_MESSAGE;
+        req->ios2_Req.io_Message.mn_Node.ln_Succ = 0;
+        req->ios2_Req.io_Message.mn_Node.ln_Pred = 0;
+        Forbid();
+        AddTail(&g_read_list, &req->ios2_Req.io_Message.mn_Node);
+        Permit();
+        service_rx_polls(4);
+        return;
 
     case CMD_WRITE:
     case S2_BROADCAST:
@@ -309,6 +425,8 @@ static void begin_io(
         if (!plipbox13_hw_send(req->ios2_DstAddr, g_mac, (UWORD)req->ios2_PacketType, g_tx_payload, req->ios2_DataLength)) {
             req->ios2_Req.io_Error = IOERR_ABORTED;
             req->ios2_WireError = S2WERR_GENERIC_ERROR;
+        } else {
+            service_rx_polls(PLIPBOX13_RX_AFTER_TX_POLLS);
         }
         break;
 

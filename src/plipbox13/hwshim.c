@@ -51,6 +51,7 @@ static int g_hw_attached;
 #define CIAA_PTR ((volatile struct CIA *)0x00bfe001UL)
 #define CIAB_PTR ((volatile struct CIA *)0x00bfd000UL)
 #define PLIP_CMD_SEND 0x11U
+#define PLIP_CMD_RECV 0x22U
 
 static void shim_memset(void *dst, UBYTE v, ULONG n)
 {
@@ -258,6 +259,107 @@ fail:
     ca->ciaddrb = 0x00;
     cb->ciapra &= (UBYTE)~(req_mask | sel_mask);
     return 0;
+}
+
+
+static int wait_rak_toggle(UBYTE *rak, ULONG limit)
+{
+    volatile struct CIA *cb = CIAB_PTR;
+    UBYTE rak_mask = (UBYTE)(1U << CIAB_PRTRBUSY);
+    ULONG i;
+
+    for (i = 0; i < limit; ++i) {
+        UBYTE now = (UBYTE)(cb->ciapra & rak_mask);
+        if (now != *rak) {
+            *rak = now;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int plipbox13_c_recv_frame(struct HWFrame *frame)
+{
+    volatile struct CIA *ca = CIAA_PTR;
+    volatile struct CIA *cb = CIAB_PTR;
+    UBYTE *p;
+    UWORD size;
+    UWORD i;
+    UBYTE rak;
+    UBYTE req_mask = (UBYTE)(1U << CIAB_PRTRPOUT);
+    UBYTE sel_mask = (UBYTE)(1U << CIAB_PRTRSEL);
+    UBYTE rak_mask = (UBYTE)(1U << CIAB_PRTRBUSY);
+
+    if (!frame)
+        return 0;
+
+    if (!wait_rak_state(0, 20000UL))
+        return 0;
+
+    p = (UBYTE *)frame;
+    ca->ciaddrb = 0xff;
+    ca->ciaprb = PLIP_CMD_RECV;
+    cb->ciapra &= ~req_mask;
+    cb->ciapra |= sel_mask;
+
+    if (!wait_rak_state(1, 20000UL))
+        goto fail;
+
+    ca->ciaddrb = 0x00;
+
+    cb->ciapra |= req_mask;
+    if (!wait_rak_state(0, 20000UL))
+        goto fail;
+    p[0] = ca->ciaprb;
+
+    cb->ciapra &= ~req_mask;
+    if (!wait_rak_state(1, 20000UL))
+        goto fail;
+    p[1] = ca->ciaprb;
+
+    size = frame->hwf_Size;
+    if (size == 0) {
+        cb->ciapra |= req_mask;
+        cb->ciapra &= (UBYTE)~(req_mask | sel_mask);
+        return 0;
+    }
+    if (size > (UWORD)(PLIP_DEFMTU + HW_ETH_HDR_SIZE))
+        goto fail;
+
+    rak = (UBYTE)(cb->ciapra & rak_mask);
+    cb->ciapra |= req_mask;
+    p += 2;
+
+    for (i = 0; i < size; ++i) {
+        if (!wait_rak_toggle(&rak, 30000UL))
+            goto fail;
+        *p++ = ca->ciaprb;
+        cb->ciapra ^= req_mask;
+    }
+
+    cb->ciapra &= (UBYTE)~(req_mask | sel_mask);
+    return 1;
+
+fail:
+    ca->ciaddrb = 0x00;
+    cb->ciapra &= (UBYTE)~(req_mask | sel_mask);
+    return 0;
+}
+
+int plipbox13_hw_try_recv(void)
+{
+    if (!g_hw_attached || !g_frame)
+        return 0;
+#if PLIPBOX13_C_SEND
+    return plipbox13_c_recv_frame(g_frame);
+#else
+    return hw_recv_frame(&g_pb, g_frame) ? 1 : 0;
+#endif
+}
+
+const struct HWFrame *plipbox13_hw_frame(void)
+{
+    return g_frame;
 }
 
 int plipbox13_hw_online(const UBYTE *mac, const char *name)
