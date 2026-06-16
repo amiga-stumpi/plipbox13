@@ -23,8 +23,8 @@ CPPFLAGS := \
 	-I$(NETINCLUDE_DIR)/include \
 	-include utility/tagitem.h \
 	-include utility/hooks.h \
-	-DDEVICE_VERSION=0 \
-	-DDEVICE_REVISION=5 \
+	-DDEVICE_VERSION=1 \
+	-DDEVICE_REVISION=0 \
 	-DPLIPBOX_GCC_DIRECT=1 \
 	-DPLIPBOX_OS13=1
 

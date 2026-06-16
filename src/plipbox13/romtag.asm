@@ -9,7 +9,7 @@
 RTC_MATCHWORD:	equ	$4afc
 RTF_AUTOINIT:	equ	(1<<7)
 NT_DEVICE:	equ	3
-VERSION:	equ	5
+VERSION:	equ	10
 PRIORITY:	equ	0
 
 	section	"text",code

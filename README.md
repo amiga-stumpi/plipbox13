@@ -29,6 +29,8 @@ Stable snapshot: `plipbox13-stable-2026-06-16` (`db76f55`).
 
 The device is a standalone Kickstart/AmigaOS 1.3 SANA-II `plipbox.device` for plipbox-05 firmware. It is intentionally not integrated into TheWire13; TheWire13 and bsdsocket.library stay generic SANA-II clients.
 
+Current device version: `plipbox.device v1.0 by Marcel Jaehne (c)2026`.
+
 Current default build:
 
 - plipbox-05 vendor code is used as the protocol reference.

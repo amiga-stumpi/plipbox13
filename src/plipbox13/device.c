@@ -92,7 +92,7 @@ extern ULONG plipbox13_rx_seglist[];
 extern struct DosLibrary *DOSBase;
 
 const char plipbox13_device_name[] = DEVICE_NAME;
-const char plipbox13_id_string[] = DEVICE_NAME " v0.5-os13-sana by Marcel Jaehne (c)2026";
+const char plipbox13_id_string[] = DEVICE_NAME " v1.0 by Marcel Jaehne (c)2026";
 
 struct ExecBase *SysBase;
 
@@ -424,8 +424,8 @@ static struct Library *init_device(
     lib->lib_Node.ln_Type = NT_DEVICE;
     lib->lib_Node.ln_Name = (char *)plipbox13_device_name;
     lib->lib_Flags = LIBF_SUMUSED | LIBF_CHANGED;
-    lib->lib_Version = 0;
-    lib->lib_Revision = 5;
+    lib->lib_Version = 1;
+    lib->lib_Revision = 0;
     lib->lib_IdString = (APTR)plipbox13_id_string;
     return lib;
 }
