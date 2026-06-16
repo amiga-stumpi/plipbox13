@@ -6,6 +6,8 @@
 #include <exec/ports.h>
 #include <exec/memory.h>
 #include <exec/interrupts.h>
+#include <exec/tasks.h>
+#include <dos/dos.h>
 #include <devices/timer.h>
 #include <utility/tagitem.h>
 #include <devices/sana2.h>
@@ -13,6 +15,7 @@
 #include "hw.h"
 
 #include <proto/exec.h>
+#include <proto/dos.h>
 #include <clib/alib_protos.h>
 
 #define DEVICE_NAME "plipbox.device"
@@ -22,11 +25,17 @@
 #ifndef PLIPBOX13_HW_STAGE
 #define PLIPBOX13_HW_STAGE 1
 #endif
-#ifndef PLIPBOX13_HANDSHAKE_DIAG
-#define PLIPBOX13_HANDSHAKE_DIAG 0
-#endif
 #ifndef PLIPBOX13_RX_AFTER_TX_POLLS
 #define PLIPBOX13_RX_AFTER_TX_POLLS 64
+#endif
+#ifndef PLIPBOX13_RX_WAKE_TICKS
+#define PLIPBOX13_RX_WAKE_TICKS 8
+#endif
+#ifndef PLIPBOX13_RX_WAKE_POLLS
+#define PLIPBOX13_RX_WAKE_POLLS 8
+#endif
+#ifndef PLIPBOX13_RX_TASK_PRI
+#define PLIPBOX13_RX_TASK_PRI 25
 #endif
 
 #ifndef S2ERR_NO_ERROR
@@ -73,10 +82,14 @@ struct BufferManagement {
 extern int plipbox13_hw_online(const UBYTE *mac, const char *name);
 extern void plipbox13_hw_offline(void);
 extern int plipbox13_hw_send(const UBYTE *dst, const UBYTE *src, UWORD type, const UBYTE *payload, ULONG len);
-extern int plipbox13_hw_handshake_test(void);
 extern int plipbox13_hw_try_recv(void);
+extern int plipbox13_hw_recv_pending(void);
+extern ULONG plipbox13_hw_recv_sigmask(void);
+extern void plipbox13_hw_set_irq_task(struct Process *proc);
 extern const struct HWFrame *plipbox13_hw_frame(void);
 extern BOOL plipbox_call_bm(BMFunc func, void *dst, void *src, LONG size);
+extern ULONG plipbox13_rx_seglist[];
+extern struct DosLibrary *DOSBase;
 
 const char plipbox13_device_name[] = DEVICE_NAME;
 const char plipbox13_id_string[] = DEVICE_NAME " v0.5-os13-sana by Marcel Jaehne (c)2026";
@@ -88,9 +101,17 @@ static struct List g_read_list;
 static UBYTE g_mac[6] = {0x1a,0x11,0xa1,0xa0,0x47,0x11};
 static UBYTE g_bcast[6] = {0xff,0xff,0xff,0xff,0xff,0xff};
 static UBYTE g_tx_payload[PLIP13_MTU];
+static struct Process *g_rx_task;
+static BYTE g_rx_kick_sig = -1;
+static ULONG g_rx_kick_mask;
+static int g_rx_stop;
+static int g_rx_busy;
+static int g_tx_busy;
 static struct BufferManagement g_bm;
 static int g_have_bm;
 static int g_online;
+
+static void service_rx_polls(UWORD polls);
 
 static void mem_copy(void *dst, const void *src, ULONG len)
 {
@@ -232,6 +253,8 @@ static int service_one_rx(void)
 
     if (!g_online || !g_have_bm)
         return 0;
+    if (!plipbox13_hw_recv_pending())
+        return 0;
     if (!plipbox13_hw_try_recv())
         return 0;
 
@@ -262,10 +285,100 @@ static int service_one_rx(void)
 static void service_rx_polls(UWORD polls)
 {
     UWORD i;
+
+    if (g_rx_busy || g_tx_busy)
+        return;
+    g_rx_busy = 1;
     for (i = 0; i < polls; ++i) {
-        if (service_one_rx())
+        if (!service_one_rx())
             break;
     }
+    g_rx_busy = 0;
+}
+
+void plipbox13_rx_task(void)
+{
+    struct Process *self;
+    struct Message *startup;
+    ULONG mask;
+
+    self = (struct Process *)FindTask(0);
+    WaitPort(&self->pr_MsgPort);
+    startup = GetMsg(&self->pr_MsgPort);
+    g_rx_task = self;
+    plipbox13_hw_set_irq_task(self);
+    ReplyMsg(startup);
+
+    while (!g_rx_stop) {
+        UWORD i;
+        mask = g_rx_kick_mask | plipbox13_hw_recv_sigmask() | SIGBREAKF_CTRL_C;
+        Wait(mask);
+        if (g_rx_stop)
+            break;
+        for (i = 0; i < PLIPBOX13_RX_WAKE_TICKS && !g_rx_stop; ++i) {
+            if (!g_tx_busy)
+                service_rx_polls(PLIPBOX13_RX_WAKE_POLLS);
+            Delay(1);
+        }
+    }
+    plipbox13_hw_set_irq_task(0);
+    g_rx_task = 0;
+    Forbid();
+}
+
+static int start_rx_task(void)
+{
+    struct MsgPort *reply;
+    struct MsgPort *task_port;
+    struct Message msg;
+
+    if (g_rx_task)
+        return 1;
+    if (!DOSBase)
+        DOSBase = (struct DosLibrary *)OpenLibrary((CONST_STRPTR)"dos.library", 0);
+    if (!DOSBase)
+        return 0;
+    if (g_rx_kick_sig == -1) {
+        g_rx_kick_sig = AllocSignal(-1);
+        if (g_rx_kick_sig == -1)
+            return 0;
+        g_rx_kick_mask = 1UL << g_rx_kick_sig;
+    }
+    reply = CreatePort(0, 0);
+    if (!reply)
+        return 0;
+    g_rx_stop = 0;
+    task_port = CreateProc((CONST_STRPTR)"plipbox.rx", PLIPBOX13_RX_TASK_PRI, ((ULONG)plipbox13_rx_seglist) >> 2, 2048);
+    if (!task_port) {
+        DeletePort(reply);
+        return 0;
+    }
+    msg.mn_Node.ln_Type = NT_MESSAGE;
+    msg.mn_ReplyPort = reply;
+    msg.mn_Length = sizeof(msg);
+    PutMsg(task_port, &msg);
+    WaitPort(reply);
+    (void)GetMsg(reply);
+    DeletePort(reply);
+    return g_rx_task ? 1 : 0;
+}
+
+static void stop_rx_task(void)
+{
+    int i;
+
+    if (!g_rx_task)
+        return;
+    g_rx_stop = 1;
+    Signal((struct Task *)g_rx_task, SIGBREAKF_CTRL_C | g_rx_kick_mask);
+    for (i = 0; i < 50 && g_rx_task; ++i)
+        Delay(1);
+}
+
+static void kick_rx_task(void)
+{
+    if (g_rx_task && g_rx_kick_mask)
+        Signal((struct Task *)g_rx_task, g_rx_kick_mask);
 }
 
 static void device_query(struct IOSana2Req *req)
@@ -301,6 +414,12 @@ static struct Library *init_device(
     g_seglist = seglist;
     list_init(&g_read_list);
     g_online = 0;
+    g_rx_task = 0;
+    g_rx_kick_sig = -1;
+    g_rx_kick_mask = 0;
+    g_rx_stop = 0;
+    g_rx_busy = 0;
+    g_tx_busy = 0;
 
     lib->lib_Node.ln_Type = NT_DEVICE;
     lib->lib_Node.ln_Name = (char *)plipbox13_device_name;
@@ -316,6 +435,12 @@ static ULONG expunge(register struct Library *dev __asm("a6"))
     if (dev->lib_OpenCnt) {
         dev->lib_Flags |= LIBF_DELEXP;
         return 0;
+    }
+    stop_rx_task();
+    if (g_rx_kick_sig != -1) {
+        FreeSignal(g_rx_kick_sig);
+        g_rx_kick_sig = -1;
+        g_rx_kick_mask = 0;
     }
     Remove((struct Node *)dev);
     return (ULONG)g_seglist;
@@ -343,6 +468,8 @@ static void open_device(
         req->ios2_Req.io_Error = S2ERR_BAD_ARGUMENT;
         return;
     }
+    if (!start_rx_task())
+        return;
     ++dev->lib_OpenCnt;
     dev->lib_Flags &= ~LIBF_DELEXP;
     req->ios2_Req.io_Device = (struct Device *)dev;
@@ -355,12 +482,16 @@ static ULONG close_device(
     register struct Library *dev __asm("a6"),
     register struct IOSana2Req *req __asm("a1"))
 {
-    g_online = 0;
-    plipbox13_hw_offline();
-    abort_all_reads();
-
     if (dev->lib_OpenCnt > 0)
         --dev->lib_OpenCnt;
+
+    if (dev->lib_OpenCnt == 0) {
+        g_online = 0;
+        stop_rx_task();
+        plipbox13_hw_offline();
+        abort_all_reads();
+    }
+
     req->ios2_Req.io_Device = 0;
     req->ios2_Req.io_Unit = 0;
 
@@ -392,6 +523,7 @@ static void begin_io(
         AddTail(&g_read_list, &req->ios2_Req.io_Message.mn_Node);
         Permit();
         service_rx_polls(4);
+        kick_rx_task();
         return;
 
     case CMD_WRITE:
@@ -416,18 +548,14 @@ static void begin_io(
         }
         if (req->ios2_Req.io_Command == S2_BROADCAST)
             mem_copy(req->ios2_DstAddr, g_bcast, 6);
-#if PLIPBOX13_HANDSHAKE_DIAG
-        (void)plipbox13_hw_handshake_test();
-        req->ios2_Req.io_Error = IOERR_ABORTED;
-        req->ios2_WireError = S2WERR_GENERIC_ERROR;
-        break;
-#endif
+        g_tx_busy = 1;
         if (!plipbox13_hw_send(req->ios2_DstAddr, g_mac, (UWORD)req->ios2_PacketType, g_tx_payload, req->ios2_DataLength)) {
             req->ios2_Req.io_Error = IOERR_ABORTED;
             req->ios2_WireError = S2WERR_GENERIC_ERROR;
-        } else {
-            service_rx_polls(PLIPBOX13_RX_AFTER_TX_POLLS);
         }
+        g_tx_busy = 0;
+        service_rx_polls(PLIPBOX13_RX_AFTER_TX_POLLS);
+        kick_rx_task();
         break;
 
     case S2_CONFIGINTERFACE:
@@ -438,6 +566,7 @@ static void begin_io(
             break;
         }
         g_online = 1;
+        kick_rx_task();
         break;
 
     case S2_ONLINE:
@@ -447,6 +576,7 @@ static void begin_io(
             break;
         }
         g_online = 1;
+        kick_rx_task();
         break;
 
     case S2_OFFLINE:

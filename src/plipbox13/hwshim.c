@@ -31,6 +31,9 @@ static struct PLIPBase g_pb;
 static struct HWFrame *g_frame;
 static int g_hw_init;
 static int g_hw_attached;
+static struct Process *g_irq_task;
+
+int plipbox13_hw_send(const UBYTE *dst, const UBYTE *src, UWORD type, const UBYTE *payload, ULONG len);
 
 #ifndef PLIPBOX13_HW_STAGE
 #define PLIPBOX13_HW_STAGE 1
@@ -40,9 +43,6 @@ static int g_hw_attached;
 #endif
 #ifndef PLIPBOX13_DIRECT_HWSEND
 #define PLIPBOX13_DIRECT_HWSEND 0
-#endif
-#ifndef PLIPBOX13_HANDSHAKE_DIAG
-#define PLIPBOX13_HANDSHAKE_DIAG 0
 #endif
 #ifndef PLIPBOX13_C_SEND
 #define PLIPBOX13_C_SEND 0
@@ -80,39 +80,6 @@ void *memset(void *dst, int c, unsigned long n)
     return dst;
 }
 
-static ULONG diag_strlen(const char *s)
-{
-    ULONG n = 0;
-    if (!s)
-        return 0;
-    while (s[n])
-        ++n;
-    return n;
-}
-
-static void diag_puts(const char *s)
-{
-    BPTR out;
-    ULONG len;
-
-    if (!DOSBase || !s)
-        return;
-    out = Output();
-    len = diag_strlen(s);
-    if (out && len)
-        Write(out, (APTR)s, (LONG)len);
-}
-
-static void diag_hex_byte(UBYTE v)
-{
-    static const char hex[] = "0123456789abcdef";
-    char out[3];
-    out[0] = hex[(v >> 4) & 15];
-    out[1] = hex[v & 15];
-    out[2] = 0;
-    diag_puts(out);
-}
-
 void plipbox_sync_global_bases(struct PLIPBase *pb)
 {
     SysBase = (struct ExecBase *)pb->pb_SysBase;
@@ -124,66 +91,27 @@ void plipbox_sync_global_bases(struct PLIPBase *pb)
     TimerBase = pb->pb_HWBase.hwb_TimerBase;
 }
 
-int plipbox13_hw_handshake_test(void)
+void plipbox13_hw_set_irq_task(struct Process *proc)
 {
-#if PLIPBOX13_HANDSHAKE_DIAG
-    volatile struct CIA *ca = CIAA_PTR;
-    volatile struct CIA *cb = CIAB_PTR;
-    UBYTE before_pra;
-    UBYTE before_ddra;
-    UBYTE after_select;
-    ULONG i;
-    int rak_seen = 0;
-
-    diag_puts("PLIP handshake diag begin\n");
-
-    before_pra = cb->ciapra;
-    before_ddra = cb->ciaddra;
-    diag_puts("PLIP ciab pra before=0x");
-    diag_hex_byte(before_pra);
-    diag_puts(" ddra=0x");
-    diag_hex_byte(before_ddra);
-    diag_puts(" ciaa ddrb=0x");
-    diag_hex_byte(ca->ciaddrb);
-    diag_puts("\n");
-
-    ca->ciaddrb = 0xff;
-    ca->ciaprb = PLIP_CMD_SEND;
-
-    cb->ciapra &= ~(1U << CIAB_PRTRPOUT);
-    cb->ciapra |= (1U << CIAB_PRTRSEL);
-
-    after_select = cb->ciapra;
-    diag_puts("PLIP ciab pra after select=0x");
-    diag_hex_byte(after_select);
-    diag_puts("\n");
-
-    for (i = 0; i < 50000UL; ++i) {
-        if (cb->ciapra & (1U << CIAB_PRTRBUSY)) {
-            rak_seen = 1;
-            break;
-        }
-    }
-
-    diag_puts("PLIP handshake rak=");
-    diag_puts(rak_seen ? "seen" : "missing");
-    diag_puts(" loops=0x");
-    diag_hex_byte((UBYTE)((i >> 8) & 0xff));
-    diag_hex_byte((UBYTE)(i & 0xff));
-    diag_puts(" pra=0x");
-    diag_hex_byte(cb->ciapra);
-    diag_puts("\n");
-
-    ca->ciaddrb = 0x00;
-    cb->ciapra &= ~((1U << CIAB_PRTRPOUT) | (1U << CIAB_PRTRSEL));
-
-    diag_puts("PLIP handshake diag end\n");
-    return rak_seen;
-#else
-    return 1;
-#endif
+    g_irq_task = proc;
+    g_pb.pb_Server = proc;
+    if (g_hw_init)
+        g_pb.pb_HWBase.hwb_Server = proc;
 }
 
+ULONG plipbox13_hw_recv_sigmask(void)
+{
+    if (!g_hw_init)
+        return 0;
+    return hw_recv_sigmask(&g_pb);
+}
+
+int plipbox13_hw_recv_pending(void)
+{
+    if (!g_hw_attached)
+        return 0;
+    return hw_recv_pending(&g_pb) ? 1 : 0;
+}
 
 static int wait_rak_state(UBYTE state, ULONG limit)
 {
@@ -225,7 +153,6 @@ static int plipbox13_c_send_frame(struct HWFrame *frame)
 
     ca->ciaddrb = 0xff;
     ca->ciaprb = PLIP_CMD_SEND;
-    cb->ciapra &= ~req_mask;
     cb->ciapra |= sel_mask;
 
     for (i = 0; i < total; ++i) {
@@ -351,7 +278,12 @@ int plipbox13_hw_try_recv(void)
     if (!g_hw_attached || !g_frame)
         return 0;
 #if PLIPBOX13_C_SEND
-    return plipbox13_c_recv_frame(g_frame);
+    {
+        int ok = plipbox13_c_recv_frame(g_frame);
+        if (ok)
+            g_pb.pb_HWBase.hwb_Flags &= (UBYTE)~HWF_RECV_PENDING;
+        return ok;
+    }
 #else
     return hw_recv_frame(&g_pb, g_frame) ? 1 : 0;
 #endif
@@ -372,7 +304,7 @@ int plipbox13_hw_online(const UBYTE *mac, const char *name)
     g_pb.pb_SysBase = (struct Library *)SysBase;
     if (!g_pb.pb_DOSBase)
         g_pb.pb_DOSBase = OpenLibrary((CONST_STRPTR)"dos.library", 0);
-    g_pb.pb_Server = (struct Process *)FindTask(0);
+    g_pb.pb_Server = g_irq_task ? g_irq_task : (struct Process *)FindTask(0);
     g_pb.pb_Task = FindTask(0);
     g_pb.pb_MTU = PLIP_DEFMTU;
     g_pb.pb_ReportBPS = PLIP_DEFBPS;
@@ -403,23 +335,17 @@ int plipbox13_hw_online(const UBYTE *mac, const char *name)
     g_hw_attached = 1;
     g_pb.pb_Flags &= ~PLIPF_OFFLINE;
 
-    (void)plipbox13_hw_handshake_test();
 
 #if PLIPBOX13_HW_STAGE < 3 || PLIPBOX13_SKIP_MAGIC
     return 1;
 #endif
 
-    /* plipbox-0.5 online/magic frame. */
-    g_frame->hwf_Size = HW_ETH_HDR_SIZE;
-    g_frame->hwf_DstAddr[0] = 0;
-    g_frame->hwf_DstAddr[1] = 5;
-    g_frame->hwf_DstAddr[2] = 0;
-    g_frame->hwf_DstAddr[3] = 0;
-    g_frame->hwf_DstAddr[4] = 0;
-    g_frame->hwf_DstAddr[5] = 0;
-    shim_memcpy(g_frame->hwf_SrcAddr, mac, 6);
-    g_frame->hwf_Type = 0xffffU;
-    (void)hw_send_frame(&g_pb, g_frame);
+    /* plipbox-0.5 online/magic frame. Use the same OS1.3-safe C send path as normal TX. */
+    {
+        static const UBYTE magic_dst[6] = {0, 5, 0, 0, 0, 0};
+        if (!plipbox13_hw_send(magic_dst, mac, 0xffffU, 0, 0))
+            goto fail;
+    }
     return 1;
 
 fail:
